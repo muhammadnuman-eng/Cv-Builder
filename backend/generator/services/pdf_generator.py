@@ -74,7 +74,7 @@ _BFS = 10.0      # body font size
 _NFS = 27.0      # name font size
 _SFS = 14.0      # section heading font size
 
-_BULLET_CHARS = '•‣⁃◦▪‐‒'
+_BULLET_CHARS = '•‣⁃◦▪‐‒·●○'
 _STRIP_RE     = re.compile(r'^[•‣⁃◦▪‐‒\-\*\s]+')
 
 _DATE_RE = re.compile(
@@ -132,60 +132,95 @@ def _strip_bullet(line: str) -> str:
 
 # ─── Experience block parsing (same logic as cv_tailor.py) ────────────────────
 
+def _is_date_only(l: str) -> bool:
+    m = _DATE_RE.search(l)
+    return bool(m) and m.start() == 0 and not l[m.end():].strip(' \t|–—-')
+
+
+def _ends_sentence(l: str) -> bool:
+    return l.rstrip().endswith(('.', '!', '?'))
+
+
+def _split_lines_into_jobs(lines: list) -> list:
+    """Non-bullet line after bullets = new job header OR wrapped bullet
+    continuation. See cv_tailor._split_lines_into_jobs for decision rules."""
+    result, cur, in_blt = [], [], False
+    for i, l in enumerate(lines):
+        if _is_bullet(l):
+            in_blt = True
+            cur.append(l)
+            continue
+        if not in_blt:
+            cur.append(l)
+            continue
+
+        new_job = False
+        if _is_date_only(l):
+            new_job = True
+        elif _DATE_RE.search(l) and not _ends_sentence(l) and l[:1].isupper():
+            new_job = True
+        elif _ends_sentence(l):
+            new_job = False
+        elif i + 1 < len(lines) and not _is_bullet(lines[i + 1]) and _is_date_only(lines[i + 1]):
+            new_job = True
+        else:
+            for k in range(1, 4):
+                li = i + k
+                if li >= len(lines) or _is_bullet(lines[li]):
+                    break
+                if _DATE_RE.search(lines[li]):
+                    new_job = True
+                    break
+
+        if new_job:
+            if cur:
+                result.append('\n'.join(cur))
+            cur = [l]
+            in_blt = False
+        else:
+            cur.append(l)
+    if cur:
+        result.append('\n'.join(cur))
+    return result
+
+
 def _merge_fragment_blocks(blocks: list) -> list:
-    result, pending = [], []
-    for block in blocks:
-        lines = [l.strip() for l in block.strip().split('\n') if l.strip()]
+    """Repair stray-blank-line fragments: leading-bullet blocks belong to the
+    previous job; headerless no-bullet blocks merge with a following bullet block."""
+    result = []
+    i = 0
+    while i < len(blocks):
+        block = blocks[i].strip()
+        lines = [l.strip() for l in block.split('\n') if l.strip()]
+        starts_blt = bool(lines) and _is_bullet(lines[0])
         has_blt = any(_is_bullet(l) for l in lines)
-        if not has_blt:
-            pending.append(block.strip())
-        else:
-            if pending:
-                result.append('\n'.join(pending) + '\n' + block.strip())
-                pending.clear()
-            else:
-                result.append(block.strip())
-    if pending:
-        if result:
-            result[-1] += '\n' + '\n'.join(pending)
-        else:
-            result.append('\n'.join(pending))
+
+        if starts_blt and result:
+            result[-1] += '\n' + block
+            i += 1
+            continue
+
+        if not has_blt and i + 1 < len(blocks):
+            next_lines = [l.strip() for l in blocks[i + 1].strip().split('\n') if l.strip()]
+            if next_lines and _is_bullet(next_lines[0]):
+                result.append(block + '\n' + blocks[i + 1].strip())
+                i += 2
+                continue
+
+        result.append(block)
+        i += 1
     return result if result else blocks
 
 
 def _split_exp_blocks(content: str) -> list:
+    # Blank lines in PDF extractions are unreliable — ALWAYS sub-split each
+    # blank-line block with the line heuristic, then repair fragments.
     blocks = [b.strip() for b in re.split(r'\n[ \t]*\n', content.strip()) if b.strip()]
-    if len(blocks) > 1:
-        return _merge_fragment_blocks(blocks)
-
-    lines = [l.strip() for l in content.split('\n') if l.strip()]
-    result, cur, in_blt = [], [], False
-
-    def _next_have_date(idx):
-        for k in range(1, 3):
-            if idx + k < len(lines) and _DATE_RE.search(lines[idx + k]):
-                return True
-        return False
-
-    for i, l in enumerate(lines):
-        is_blt = _is_bullet(l)
-        if is_blt:
-            in_blt = True
-            cur.append(l)
-        elif not in_blt:
-            cur.append(l)
-        else:
-            is_new = '|' in l or _DATE_RE.search(l) or _next_have_date(i)
-            if is_new:
-                if cur:
-                    result.append('\n'.join(cur))
-                cur = [l]
-                in_blt = False
-            else:
-                cur.append(l)
-    if cur:
-        result.append('\n'.join(cur))
-    return _merge_fragment_blocks(result) if result else blocks
+    jobs = []
+    for b in blocks:
+        lines = [l.strip() for l in b.split('\n') if l.strip()]
+        jobs.extend(_split_lines_into_jobs(lines))
+    return _merge_fragment_blocks(jobs)
 
 
 def _parse_job_block(block: str) -> dict:
@@ -235,7 +270,12 @@ def _parse_job_block(block: str) -> dict:
         for hl in hdr_lines[1:]:
             m = _DATE_RE.search(hl)
             if m and not date_str:
-                date_str = hl.strip()
+                date_str = m.group(0).strip()
+                rem = hl[:m.start()].strip(' ,|–—-')
+                if rem and not company:
+                    company = rem
+            elif _is_date_only(hl):
+                continue  # extra date line — never treat a date as the company
             elif not company:
                 company = hl.strip()
             else:
@@ -270,17 +310,45 @@ def _parse_skills(content: str) -> list:
 
 # ─── Project block parser ──────────────────────────────────────────────────────
 
+_PLATFORM_LABEL = re.compile(r'^(github|gitlab|bitbucket|portfolio|linkedin|website|link)$', re.I)
+_TS_LINE = re.compile(r'^tech\s*stack:', re.I)
+
+
+def _normalize_proj_lines(content: str) -> list:
+    lines = [l.strip() for l in re.sub(r'[​‌‍﻿]', '', content).split('\n')]
+    lines = [l for l in lines if l and not _PLATFORM_LABEL.match(l)]
+
+    # Re-join wrapped Tech Stack lines (stack list ending with a continuation char)
+    joined = []
+    for l in lines:
+        prev = joined[-1] if joined else ''
+        if _TS_LINE.match(prev) and re.search(r'[,&/+\-]$', prev) and not _TS_LINE.match(l):
+            joined[-1] = prev + ' ' + l
+        else:
+            joined.append(l)
+    return joined
+
+
 def _parse_proj_blocks(content: str) -> list:
+    # Split at 'Tech Stack:' boundaries — each stack line ends one project.
+    # Blank lines are unreliable in PDF extractions, so don't depend on them.
+    blocks, cur = [], []
+    for l in _normalize_proj_lines(content):
+        cur.append(l)
+        if _TS_LINE.match(l):
+            blocks.append(cur)
+            cur = []
+    if cur:
+        blocks.append(cur)
+
     projects = []
-    for block in re.split(r'\n[ \t]*\n', content.strip()):
-        if not block.strip():
-            continue
-        lines = [l.strip() for l in block.split('\n') if l.strip()]
+    for lines in blocks:
         title = lines[0] if lines else ''
-        ts_idx = next((i for i, l in enumerate(lines) if re.match(r'^tech\s*stack:', l, re.I)), -1)
+        ts_idx = next((i for i, l in enumerate(lines) if _TS_LINE.match(l)), -1)
         desc_lines = lines[1:ts_idx] if ts_idx >= 0 else lines[1:]
         tech_stack = re.sub(r'^tech\s*stack:\s*', '', lines[ts_idx], flags=re.I) if ts_idx >= 0 else ''
-        projects.append({'title': title, 'desc': ' '.join(desc_lines), 'ts': tech_stack})
+        if title or desc_lines or tech_stack:
+            projects.append({'title': title, 'desc': ' '.join(desc_lines), 'ts': tech_stack})
     return projects
 
 
@@ -369,10 +437,8 @@ def _build_cv_pdf(sections: dict, output_path: str) -> str:
 
     # ── Helper: section heading (icon + title + rule) ──────────────────────────
     def _sec_header(key: str):
-        icon  = _ICONS.get(key, '')
         label = _LABELS.get(key, key.replace('_', ' ').title())
-        heading_text = f'{icon} {label}' if icon else label
-        para = Paragraph(f'<b>{_esc(heading_text)}</b>', sec_s)
+        para = Paragraph(f'<b>{_esc(label)}</b>', sec_s)
         rule = HRFlowable(width='100%', thickness=0.75, color=_BLK, spaceAfter=5, spaceBefore=2)
         return [Spacer(1, 9), para, rule]
 
@@ -398,15 +464,23 @@ def _build_cv_pdf(sections: dict, output_path: str) -> str:
         return t
 
     # ── Header block (name + contact + thick rule) ─────────────────────────────
-    name_raw = (sections.get('header')  or '').strip()
-    ctct_raw = (sections.get('contact') or '').strip()
+    _contact_hint = re.compile(r'@|linkedin|github|portfolio|website|\+?\d[\d\s\-().]{6,}\d', re.I)
+    hdr_all = [l.strip() for l in (sections.get('header') or '').split('\n') if l.strip()]
+    name_raw = next((l for l in hdr_all if not _contact_hint.search(l)), hdr_all[0] if hdr_all else '')
+
+    ctct_items, _seen = [], set()
+    ctct_src = [l.strip() for l in (sections.get('contact') or '').split('\n') if l.strip()]
+    ctct_src += [l for l in hdr_all if l != name_raw and _contact_hint.search(l)]
+    for it in ctct_src:
+        if it.lower() not in _seen:
+            _seen.add(it.lower())
+            ctct_items.append(it)
 
     if name_raw:
         story.append(Paragraph(f'<b>{_esc(name_raw)}</b>', name_s))
 
-    if ctct_raw:
-        ctct_line = '   •   '.join(l.strip() for l in ctct_raw.split('\n') if l.strip())
-        story.append(Paragraph(_esc(ctct_line), ctct_s))
+    if ctct_items:
+        story.append(Paragraph(_esc('   •   '.join(ctct_items)), ctct_s))
 
     story.append(Spacer(1, 7))
     story.append(HRFlowable(width='100%', thickness=1.3, color=_BLK, spaceAfter=8))
@@ -544,10 +618,16 @@ def _build_cv_pdf(sections: dict, output_path: str) -> str:
                 lines = [l.strip() for l in block.split('\n') if l.strip()]
                 if not lines:
                     continue
+                # Date-only first line is the block's date — title is next line
+                dt = ''
+                if _is_date_only(lines[0]) and len(lines) > 1:
+                    dt = lines[0]
+                    lines = lines[1:]
                 first = lines[0]
                 m     = _DATE_RE.search(first)
-                ttl   = first[:m.start()].rstrip('|–—- ').strip() if m else first
-                dt    = m.group(0).strip() if m else ''
+                ttl   = (first[:m.start()].rstrip('|–—- ').strip() if m else first).rstrip(',')
+                if m and not dt:
+                    dt = m.group(0).strip()
 
                 anchor = [_title_date_row(ttl, dt)]
                 for l in lines[1:]:

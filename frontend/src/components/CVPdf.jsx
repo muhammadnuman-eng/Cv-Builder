@@ -1,8 +1,9 @@
-// @react-pdf/renderer document — matches screenshot design exactly
+// @react-pdf/renderer document — matches the original CV design exactly
 import { Document, Page, Text, View, StyleSheet, Font } from '@react-pdf/renderer'
 import { parseExperienceJobs } from '../utils/experienceParser'
 import { parseProjectBlocks } from '../utils/projectParser'
 
+// Emoji render as embedded twemoji images — Helvetica has no emoji glyphs
 Font.registerEmojiSource({
   format: 'png',
   url: 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/',
@@ -26,25 +27,21 @@ const S = StyleSheet.create({
   // ── Header ──────────────────────────────────────────────────────────────────
   headerWrap: {
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: 12,
   },
   name: {
     fontFamily: 'Helvetica-Bold',
     fontSize: 26,
+    lineHeight: 1.2,
     textAlign: 'center',
-    marginBottom: 6,
+    marginBottom: 14,
   },
-  contactRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
-    width: '100%',
-  },
-  contactItem: {
+  contactLine: {
     fontSize: 9.5,
     color: GRY,
-    marginHorizontal: 8,
-    marginBottom: 3,
+    textAlign: 'center',
+    lineHeight: 1.6,
+    marginTop: 2,
   },
   hrBold: {
     borderBottomWidth: 1.3,
@@ -53,18 +50,9 @@ const S = StyleSheet.create({
   },
 
   // ── Section header ─────────────────────────────────────────────────────────
-  // secWrap uses wrap={false} so the title row + hrThin never split across pages
+  // secWrap uses wrap={false} so the title + hrThin never split across pages
   secWrap: {
     marginTop: 10,
-  },
-  secRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  secIcon: {
-    fontSize: 13,
-    marginRight: 5,
-    lineHeight: 1,
   },
   secTitle: {
     fontFamily: 'Helvetica-Bold',
@@ -105,13 +93,13 @@ const S = StyleSheet.create({
     color: BLK,
   },
 
-  // ── Experience — one Text block per job (react-pdf overlaps sibling Text nodes) ─
+  // ── Experience ───────────────────────────────────────────────────────────────
   jobBlock: {
     marginBottom: 12,
   },
   jobHdrRow: {
     flexDirection: 'row',
-    marginBottom: 5,
+    marginBottom: 2,
   },
   jobHdrTitle: {
     fontFamily: 'Helvetica-Bold',
@@ -125,6 +113,11 @@ const S = StyleSheet.create({
     width: '28%',
     textAlign: 'right',
     lineHeight: 1.45,
+  },
+  company: {
+    fontFamily: 'Helvetica-Bold',
+    fontSize: 10,
+    marginBottom: 3,
   },
   bltList: {
     fontFamily: 'Helvetica',
@@ -149,10 +142,6 @@ const S = StyleSheet.create({
     textAlign: 'justify',
     marginBottom: 2,
   },
-  techRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-  },
   techLbl: {
     fontFamily: 'Helvetica-BoldOblique',
     fontSize: 9.5,
@@ -160,7 +149,6 @@ const S = StyleSheet.create({
   techVal: {
     fontFamily: 'Helvetica-Oblique',
     fontSize: 9.5,
-    flex: 1,
   },
 
   // ── Education / Certs ────────────────────────────────────────────────────────
@@ -198,35 +186,48 @@ const S = StyleSheet.create({
 const DATE_RE_STR = String.raw`\b(\d{1,2}[/\-]\d{4}|\d{4})(?:\s*[-–—to]+\s*(?:present|current|now|\d{1,2}[/\-]\d{4}|\d{4}))?`
 const matchDate = str => new RegExp(DATE_RE_STR, 'i').exec(str)
 
+const TRAIL_SEP_RE = /[|–—,\-\s]+$/
+
 function sanitizeLine(s) {
   return (s || '').replace(/\s+/g, ' ').trim()
 }
 
 const CONTACT_HINT_RE = /[@]|linkedin|github|portfolio|website|\+?\d[\d\s\-().]{6,}\d/i
+const ZERO_WIDTH_RE = /[​‌‍﻿]/g
 
-function extractDisplayName(headerRaw, contactRaw) {
+function extractDisplayName(headerRaw) {
   const headerLines = (headerRaw || '').split('\n').map(l => l.trim()).filter(Boolean)
-  const contactLines = (contactRaw || '').split('\n').map(l => l.trim()).filter(Boolean)
   const nameLine = headerLines.find(l => !CONTACT_HINT_RE.test(l) && l.length >= 2)
   if (nameLine) return sanitizeLine(nameLine)
   if (headerLines[0]) return sanitizeLine(headerLines[0])
   return ''
 }
 
-function parseContactItems(contactRaw) {
-  return (contactRaw || '')
-    .split('\n')
-    .map(l => l.trim())
-    .filter(Boolean)
+// Merge contact lines from BOTH the contact section and any contact-ish lines
+// the parser left inside the header (older parses) — deduped, zero-width cleaned.
+function parseContactItems(headerRaw, contactRaw) {
+  const fromContact = (contactRaw || '').split('\n')
+  const fromHeader = (headerRaw || '').split('\n').filter(l => CONTACT_HINT_RE.test(l))
+  const seen = new Set()
+  const items = []
+  for (const raw of [...fromContact, ...fromHeader]) {
+    const t = raw.replace(ZERO_WIDTH_RE, '').trim()
+    if (!t) continue
+    const key = t.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    items.push(t)
+  }
+  return items
 }
 
 function contactIcon(text) {
-  if (/@/.test(text)) return '\u2709  '
-  if (/^\+?[\d\s\-().]{7,}$/.test(text)) return '\u260E  '
-  if (/linkedin/i.test(text)) return '\uD83D\uDD17  '
-  if (/github/i.test(text)) return '\uD83D\uDCBB  '
-  if (/portfolio|website/i.test(text)) return '\uD83C\uDF10  '
-  return '\u2022  '
+  if (/@/.test(text))                     return '✉️ '
+  if (/^\+?[\d\s\-().]{7,}$/.test(text))  return '📞 '
+  if (/linkedin/i.test(text))             return '🔗 '
+  if (/github/i.test(text))               return '💻 '
+  if (/portfolio|website/i.test(text))    return '🌐 '
+  return ''
 }
 
 function cleanCommas(s) {
@@ -243,13 +244,13 @@ function chunkSkillVal(val, n = 8) {
   return chunks
 }
 
-const BULLET_RE = /^[•‣⁃◦▪‐‒\-\*·●○◦▪]\s*/
+const BULLET_RE = /^[•‣⁃◦▪‐‒\-\*·●○]\s*/
 function isBullet(l) { return BULLET_RE.test(l.trim()) }
-function stripBullet(l) { return l.replace(/^[•‣⁃◦▪‐‒\-\*·●○◦▪\s]+/, '') }
+function stripBullet(l) { return l.replace(/^[•‣⁃◦▪‐‒\-\*·●○\s]+/, '') }
 
 // ─── Skills parser ─────────────────────────────────────────────────────────────
 // Handles 2-column PDFs where category headers appear consecutively before values.
-// MAX_SKILL_CHARS prevents project description text from bleeding into skill values.
+// MAX_SKILL_CHARS prevents stray text from bleeding into skill values.
 const MAX_SKILL_CHARS = 350
 
 function parseSkills(text) {
@@ -294,39 +295,47 @@ function parseSkills(text) {
   return cats
 }
 
-// ─── Other parsers ─────────────────────────────────────────────────────────────
+// ─── Education / Certifications parsers ────────────────────────────────────────
+// A date-only first line ('02/2017 – 08/2021') is the block's date — the title
+// (degree/cert name) is the NEXT line, the institution after that.
+function shiftDateOnlyFirst(lines) {
+  const first = lines[0] || ''
+  const m = matchDate(first)
+  if (m && m.index === 0 && !first.slice(m[0].length).replace(/[\s|–—-]+/g, '')) {
+    return { dt: first.trim(), rest: lines.slice(1) }
+  }
+  return { dt: '', rest: lines }
+}
+
 function parseEdu(text) {
   return text.split(/\n\s*\n/).filter(b => b.trim()).map(block => {
-    const lines = block.split('\n').map(l => l.trim()).filter(Boolean)
-    const first = lines[0] || ''
+    const all = block.split('\n').map(l => l.trim()).filter(Boolean)
+    let { dt, rest } = shiftDateOnlyFirst(all)
+    const first = rest[0] || ''
     const m = matchDate(first)
-    const title = m ? first.slice(0, m.index).replace(/[|—\-\s]+$/, '').trim() : first
-    const dt = m ? m[0] : ''
-    return { title, dt, inst: lines[1] || '', extra: lines.slice(2).join(' ') }
+    const title = (m ? first.slice(0, m.index).replace(TRAIL_SEP_RE, '').trim() : first).replace(/,$/, '')
+    if (m && !dt) dt = m[0]
+    return { title, dt, inst: rest[1] || '', extra: rest.slice(2).join(' ') }
   })
 }
 
 function parseCerts(text) {
   return text.split(/\n\s*\n/).filter(b => b.trim()).map(block => {
-    const lines = block.split('\n').map(l => l.trim()).filter(Boolean)
-    const first = lines[0] || ''
+    const all = block.split('\n').map(l => l.trim()).filter(Boolean)
+    let { dt, rest } = shiftDateOnlyFirst(all)
+    const first = rest[0] || ''
     const m = matchDate(first)
-    const title = m ? first.slice(0, m.index).replace(/[|—\-\s]+$/, '').trim() : first
-    const dt = m ? m[0] : ''
-    return { title, dt, rest: lines.slice(1).join(' ') }
+    const title = (m ? first.slice(0, m.index).replace(TRAIL_SEP_RE, '').trim() : first).replace(/,$/, '')
+    if (m && !dt) dt = m[0]
+    return { title, dt, rest: rest.slice(1).join(' ') }
   })
 }
 
 // ─── Section header ────────────────────────────────────────────────────────────
-// Returns a View (NOT Fragment) so the icon+title row and the hrThin
-// are always kept together and never split across pages.
-function SecHeader({ icon, title }) {
+function SecHeader({ title }) {
   return (
     <View style={S.secWrap} wrap={false}>
-      <View style={S.secRow}>
-        <Text style={S.secIcon}>{icon} </Text>
-        <Text style={S.secTitle}>{title}</Text>
-      </View>
+      <Text style={S.secTitle}>{title}</Text>
       <View style={S.hrThin} />
     </View>
   )
@@ -347,8 +356,8 @@ export default function CVPdf({ sections }) {
   const awardsText = (sections.awards         || '').trim()
   const langsText  = (sections.languages      || '').trim()
 
-  const displayName = extractDisplayName(name, contactRaw)
-  const contactItems = parseContactItems(contactRaw)
+  const displayName = extractDisplayName(name)
+  const contactItems = parseContactItems(name, contactRaw)
   const summaryParas = summary.split(/\n\s*\n/).map(p => sanitizeLine(p)).filter(Boolean)
 
   const skills      = parseSkills(skillsText)
@@ -365,41 +374,34 @@ export default function CVPdf({ sections }) {
     <Document>
       <Page size="A4" style={S.page}>
 
-        {/* ── Name + Contact (image 4 layout — separate rows, no overlap) ── */}
+        {/* Name + contact (single Text per row — flex-row Texts overlap in react-pdf) */}
         {(displayName || contactItems.length > 0) ? (
           <View style={S.headerWrap}>
             {displayName ? <Text style={S.name}>{displayName}</Text> : null}
             {contactItems.length > 0 ? (
-              <View style={S.contactRow}>
-                {contactItems.map((item, i) => (
-                  <Text key={i} style={S.contactItem}>
-                    {contactIcon(item)}{item}
-                  </Text>
-                ))}
-              </View>
+              <Text style={S.contactLine}>
+                {contactItems.map(it => contactIcon(it) + it).join('     ')}
+              </Text>
             ) : null}
           </View>
         ) : null}
 
-        {/* ── Bold divider ── */}
         <View style={S.hrBold} />
 
-        {/* ── Professional Profile ── */}
+        {/* Professional Profile */}
         {summaryParas.length > 0 ? (
           <View>
-            <SecHeader icon="📋" title="Professional Profile" />
+            <SecHeader title="Professional Profile" />
             {summaryParas.map((p, i) => (
               <Text key={i} style={[S.body, i > 0 ? { marginTop: 6 } : {}]}>{p}</Text>
             ))}
           </View>
         ) : null}
 
-        {/* ── Core Technical Skills ── */}
+        {/* Core Technical Skills — 2-column grid, View wrappers (not Fragments) */}
         {skills.length > 0 ? (
           <View>
-            <SecHeader icon="🧠" title="Core Technical Skills" />
-            {/* Each row has two columns. Columns use View wrappers (NOT Fragments)
-                to avoid the @react-pdf/renderer Fragment layout bug. */}
+            <SecHeader title="Core Technical Skills" />
             {Array.from({ length: skillRows }).map((_, i) => (
               <View key={i} style={S.skRow}>
                 <View style={S.skCol}>
@@ -427,23 +429,21 @@ export default function CVPdf({ sections }) {
           </View>
         ) : null}
 
-        {/* ── Professional Experience ── */}
+        {/* Professional Experience — title+date row, bold company row, bullets */}
         {expBlocks.length > 0 ? (
           <View>
-            <SecHeader icon="💼" title="Professional Experience" />
+            <SecHeader title="Professional Experience" />
             {expBlocks.map((job, i) => {
-              const jobLabel = [job.title, job.company].filter(Boolean).join(', ')
-              const bulletText = job.bullets
-                .map(b => `\u2022  ${b}`)
-                .join('\n')
+              const bulletText = job.bullets.map(b => `•  ${b}`).join('\n')
               return (
                 <View key={i} style={S.jobBlock}>
-                  {(jobLabel || job.date) ? (
+                  {(job.title || job.date) ? (
                     <View style={S.jobHdrRow}>
-                      <Text style={S.jobHdrTitle}>{jobLabel}</Text>
+                      <Text style={S.jobHdrTitle}>{job.title || ''}</Text>
                       <Text style={S.jobHdrDate}>{job.date || ''}</Text>
                     </View>
                   ) : null}
+                  {job.company ? <Text style={S.company}>{job.company}</Text> : null}
                   {bulletText ? <Text style={S.bltList}>{bulletText}</Text> : null}
                 </View>
               )
@@ -451,10 +451,10 @@ export default function CVPdf({ sections }) {
           </View>
         ) : null}
 
-        {/* ── Key Projects ── */}
+        {/* Key Projects */}
         {projBlocks.length > 0 ? (
           <View>
-            <SecHeader icon="📂" title="Key Projects" />
+            <SecHeader title="Key Projects" />
             {projBlocks.map((p, i) => (
               <View key={i} style={S.projBlock}>
                 <Text style={S.projTitle}>{p.title}</Text>
@@ -470,12 +470,12 @@ export default function CVPdf({ sections }) {
           </View>
         ) : null}
 
-        {/* ── Education ── */}
+        {/* Education */}
         {eduBlocks.length > 0 ? (
           <View>
             {eduBlocks.map((e, i) => (
               <View key={i} style={i > 0 ? S.eduBlock : {}}>
-                {i === 0 && <SecHeader icon="🎓" title="Education" />}
+                {i === 0 && <SecHeader title="Education" />}
                 <View style={S.eduHdrRow}>
                   <Text style={S.eduTitle}>{e.title}</Text>
                   {e.dt ? <Text style={S.eduDate}>{e.dt}</Text> : null}
@@ -487,12 +487,12 @@ export default function CVPdf({ sections }) {
           </View>
         ) : null}
 
-        {/* ── Certifications ── */}
+        {/* Certifications */}
         {certBlocks.length > 0 ? (
           <View>
             {certBlocks.map((c, i) => (
               <View key={i} style={i > 0 ? S.eduBlock : {}}>
-                {i === 0 && <SecHeader icon="📜" title="Certifications" />}
+                {i === 0 && <SecHeader title="Certifications" />}
                 <View style={S.eduHdrRow}>
                   <Text style={S.eduTitle}>{c.title}</Text>
                   {c.dt ? <Text style={S.eduDate}>{c.dt}</Text> : null}
@@ -503,20 +503,20 @@ export default function CVPdf({ sections }) {
           </View>
         ) : null}
 
-        {/* ── Awards ── */}
+        {/* Awards */}
         {awardsText ? (
           <View>
-            <SecHeader icon="🏆" title="Awards & Achievements" />
+            <SecHeader title="Awards & Achievements" />
             {awardsText.split('\n').filter(l => l.trim()).map((l, i) => (
               <Text key={i} style={S.body}>{l.trim()}</Text>
             ))}
           </View>
         ) : null}
 
-        {/* ── Languages ── */}
+        {/* Languages */}
         {langsText ? (
           <View>
-            <SecHeader icon="🌐" title="Languages" />
+            <SecHeader title="Languages" />
             {langsText.split('\n').filter(l => l.trim()).map((l, i) => (
               <Text key={i} style={S.body}>{l.trim()}</Text>
             ))}

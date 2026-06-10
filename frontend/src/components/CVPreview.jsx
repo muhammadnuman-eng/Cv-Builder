@@ -186,11 +186,19 @@ function StructuredSection({ content }) {
   return (
     <div className="space-y-3">
       {blocks.map((block, i) => {
-        const lines = block.split('\n').map(l => l.trim()).filter(Boolean)
+        let lines = block.split('\n').map(l => l.trim()).filter(Boolean)
+        let dt = ''
+        // Date-only first line ('02/2017 – 08/2021') is the block's date —
+        // the real title (degree/cert) is the next line.
+        const m0 = DATE_RE.exec(lines[0] || '')
+        if (m0 && m0.index === 0 && !(lines[0].slice(m0[0].length).replace(/[\s|–—-]+/g, ''))) {
+          dt = lines[0]
+          lines = lines.slice(1)
+        }
         const first = lines[0] || ''
         const m     = DATE_RE.exec(first)
-        const ttl   = m ? first.slice(0, m.index).replace(/[|–—\-\s]+$/, '').trim() : first
-        const dt    = m ? m[0] : ''
+        const ttl   = (m ? first.slice(0, m.index).replace(/[|–—\-\s]+$/, '').trim() : first).replace(/,$/, '')
+        if (m && !dt) dt = m[0]
         return (
           <div key={i}>
             <div className="flex justify-between items-baseline gap-4">
@@ -244,8 +252,32 @@ function ProseSection({ content }) {
 
 // ── Contact row ────────────────────────────────────────────────────────────────
 
-function ContactRow({ rawContact }) {
-  const items = rawContact.split('\n').map(l => l.trim()).filter(Boolean)
+const CONTACT_HINT_RE = /[@]|linkedin|github|portfolio|website|\+?\d[\d\s\-().]{6,}\d/i
+const ZERO_WIDTH_RE = /[​‌‍﻿]/g
+
+function extractDisplayName(headerRaw) {
+  const lines = (headerRaw || '').split('\n').map(l => l.trim()).filter(Boolean)
+  return lines.find(l => !CONTACT_HINT_RE.test(l)) || lines[0] || ''
+}
+
+function mergeContactItems(headerRaw, rawContact) {
+  const fromContact = (rawContact || '').split('\n')
+  const fromHeader = (headerRaw || '').split('\n').filter(l => CONTACT_HINT_RE.test(l))
+  const seen = new Set()
+  const items = []
+  for (const raw of [...fromContact, ...fromHeader]) {
+    const t = raw.replace(ZERO_WIDTH_RE, '').trim()
+    if (!t) continue
+    const key = t.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    items.push(t)
+  }
+  return items
+}
+
+function ContactRow({ rawHeader, rawContact }) {
+  const items = mergeContactItems(rawHeader, rawContact)
   if (!items.length) return null
 
   const getIcon = (text) => {
@@ -300,9 +332,9 @@ export default function CVPreview({ sections, downloadButton }) {
         {name && (
           <div className="text-center">
             <h1 className="text-[26px] font-bold text-gray-900 leading-tight">
-              {(name.split('\n').map(l => l.trim()).find(l => l && !/[@]|linkedin|github|\+?\d{7}/i.test(l)) || name.split('\n')[0] || name).trim()}
+              {extractDisplayName(name)}
             </h1>
-            {contact && <ContactRow rawContact={contact} />}
+            <ContactRow rawHeader={name} rawContact={contact} />
             <div className="border-b-[1.5px] border-gray-900 mt-3" />
           </div>
         )}

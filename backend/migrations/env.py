@@ -8,9 +8,15 @@ from alembic import context
 from database.db import Base
 from auth.models.user import User  # noqa: F401 — registers model
 
+import os
+from config import settings
+
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+# Always read DB URL from .env (overrides any hardcoded value in alembic.ini)
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
 
 target_metadata = Base.metadata
 

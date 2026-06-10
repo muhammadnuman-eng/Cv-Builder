@@ -24,6 +24,8 @@ export function isProjectTitleLine(line) {
   if (/^tech\s*stack:/i.test(t)) return false
   if (PLATFORM_RE.test(t)) return false
   if (BULLET_RE.test(t)) return false
+  // Wrapped description lines end mid-sentence with ',' or '.', titles don't
+  if (/[.,;:]$/.test(t)) return false
   if (/^[A-Z0-9][^.\n]{0,110},\s*[A-Z0-9]/.test(t) && wordsBeforeComma(t) >= 2) return true
   if (
     /^[A-Z][A-Za-z0-9\s&+().'\-/]{3,90}$/.test(t) &&
@@ -62,11 +64,13 @@ function parseOneProjBlock(block) {
     if (inlineTs) {
       let stack = inlineTs[2].trim()
       const splitIdx = stack.search(NEXT_PROJ_IN_STACK_RE)
-      if (splitIdx > 0) {
-        desc = inlineTs[1].replace(/[,.]$/, '').trim()
+      desc = inlineTs[1].replace(/[,.]$/, '').trim()
+      // Only treat a Capitalized run inside the stack as an embedded next
+      // project when a full description follows — short tails like
+      // 'Stripe API, Docker' are just more stack items.
+      if (splitIdx > 0 && stack.slice(splitIdx).trim().length >= 100) {
         ts = stack.slice(0, splitIdx).trim()
       } else {
-        desc = inlineTs[1].replace(/[,.]$/, '').trim()
         ts = stack
       }
     } else {
@@ -103,7 +107,9 @@ function splitInlineTechStackLine(line) {
   const pieces = []
 
   const splitIdx = stackPart.search(NEXT_PROJ_IN_STACK_RE)
-  if (splitIdx > 0) {
+  // Only split when a full description follows the candidate title — short
+  // tails like 'Stripe API, Docker' are just more stack items.
+  if (splitIdx > 0 && stackPart.slice(splitIdx).trim().length >= 100) {
     const stack = stackPart.slice(0, splitIdx).trim()
     const remainder = stackPart.slice(splitIdx).trim()
     if (before) pieces.push({ type: 'line', text: before })
@@ -148,11 +154,29 @@ function linesToBlocks(lines) {
 }
 
 function normalizeProjectText(text) {
-  return text
+  const lines = text
+    .replace(/[​‌‍﻿]/g, '')   // zero-width chars from PDF extraction
     .split('\n')
     .filter(l => !PLATFORM_RE.test(l.trim()))
-    .join('\n')
-    .trim()
+
+  // Re-join wrapped Tech Stack lines: a stack list ending with a continuation
+  // char (',' '&' '/' '+' '-') means the next line is more of the same stack.
+  const joined = []
+  for (const raw of lines) {
+    const l = raw.trim()
+    const prev = joined[joined.length - 1] || ''
+    if (
+      l &&
+      /^tech\s*stack:/i.test(prev.trim()) &&
+      /[,&/+\-]$/.test(prev.trim()) &&
+      !/^tech\s*stack:/i.test(l)
+    ) {
+      joined[joined.length - 1] = prev.trim() + ' ' + l
+    } else {
+      joined.push(raw)
+    }
+  }
+  return joined.join('\n').trim()
 }
 
 export function parseProjectBlocks(text) {

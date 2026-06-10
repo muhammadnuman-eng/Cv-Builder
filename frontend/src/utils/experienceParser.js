@@ -46,28 +46,8 @@ function isDateOnlyLine(line) {
   return m.index <= 2 && after === ''
 }
 
-function isLikelyJobStart(line, lines, idx) {
-  if (isBullet(line)) return false
-  if (isJobHeaderLine(line)) return true
-  if (line.includes('|')) return true
-  if (hasDate(line) && !/[.!?]$/.test(line.trim())) return true
-
-  for (let k = 1; k <= 5; k++) {
-    const li = idx + k
-    if (li >= lines.length) break
-    if (isBullet(lines[li])) break
-    if (hasDate(lines[li])) return true
-  }
-
-  if (looksLikeJobTitle(line) && line.includes(',') && !/[.!?]$/.test(line.trim())) {
-    for (let k = 1; k <= 3; k++) {
-      const nl = lines[idx + k]
-      if (!nl) break
-      if (isBullet(nl)) break
-      if (isDateOnlyLine(nl) || isJobHeaderLine(nl)) return true
-    }
-  }
-  return false
+function endsSentence(l) {
+  return /[.!?]$/.test((l || '').trim())
 }
 
 function parseJobHeaderLine(line) {
@@ -87,33 +67,50 @@ function parseJobHeaderLine(line) {
 }
 
 function mergeFragments(blocks) {
-  // Only merge a no-bullet block with the NEXT block if the next block STARTS with
-  // a bullet — meaning the no-bullet block is a split-off header, not a brief job.
-  // If the next block starts with a non-bullet (e.g. another company name), keep both
-  // blocks separate so brief/no-bullet jobs don't get swallowed by the following job.
+  // Repair blocks broken by stray blank lines:
+  //  - A block STARTING with a bullet has no header — its bullets belong to the
+  //    previous job (a blank line split a job's bullet list in half).
+  //  - A no-bullet block followed by a block starting with a bullet is a
+  //    split-off header — merge the two.
   const result = []
   let i = 0
   while (i < blocks.length) {
     const block = blocks[i].trim()
-    const hasBlt = block.split('\n').some(l => isBullet(l.trim()))
+    const lines = block.split('\n').map(l => l.trim()).filter(Boolean)
+    const startsBlt = lines.length > 0 && isBullet(lines[0])
+    const hasBlt = lines.some(isBullet)
+
+    if (startsBlt && result.length) {
+      result[result.length - 1] += '\n' + block
+      i++
+      continue
+    }
+
     if (!hasBlt && i + 1 < blocks.length) {
-      const nextBlock = blocks[i + 1].trim()
-      const nextFirstNonEmpty = nextBlock.split('\n').map(l => l.trim()).find(Boolean) || ''
-      if (isBullet(nextFirstNonEmpty)) {
-        // Header fragment + its bullet block → merge into one job block
-        result.push(block + '\n' + nextBlock)
+      const nextFirst = blocks[i + 1].trim().split('\n').map(l => l.trim()).find(Boolean) || ''
+      if (isBullet(nextFirst)) {
+        result.push(block + '\n' + blocks[i + 1].trim())
         i += 2
         continue
       }
     }
+
     result.push(block)
     i++
   }
   return result.length ? result : blocks
 }
 
-function splitExpBlocksByLines(content) {
-  const lines = content.split('\n').map(l => l.trim()).filter(Boolean)
+// Split a flat run of lines into per-job blocks.
+// A non-bullet line AFTER bullets started is either a new job header or a
+// wrapped continuation of the previous bullet. Decision order:
+//   1. date-only line                    -> new job   ('08/2024 – 09/2025')
+//   2. uppercase line containing a date  -> new job   ('Title, Co 01/2024 – 07/2025')
+//   3. ends with sentence punctuation    -> continuation ('cycles and faster delivery.')
+//   4. next line is date-only            -> new job   ('Title, Co' + date below)
+//   5. date within 3 non-bullet lines    -> new job   (multi-line headers)
+//   6. default                           -> continuation
+function splitLinesIntoJobs(lines) {
   const result = []
   let cur = []
   let inBullets = false
@@ -123,9 +120,31 @@ function splitExpBlocksByLines(content) {
     if (isBullet(l)) {
       inBullets = true
       cur.push(l)
-    } else if (!inBullets) {
+      continue
+    }
+    if (!inBullets) {
       cur.push(l)
-    } else if (isLikelyJobStart(l, lines, i)) {
+      continue
+    }
+
+    let newJob = false
+    if (isDateOnlyLine(l)) {
+      newJob = true
+    } else if (hasDate(l) && !endsSentence(l) && /^[A-Z0-9]/.test(l)) {
+      newJob = true
+    } else if (endsSentence(l)) {
+      newJob = false
+    } else if (i + 1 < lines.length && !isBullet(lines[i + 1]) && isDateOnlyLine(lines[i + 1])) {
+      newJob = true
+    } else {
+      for (let k = 1; k <= 3; k++) {
+        const li = i + k
+        if (li >= lines.length || isBullet(lines[li])) break
+        if (hasDate(lines[li])) { newJob = true; break }
+      }
+    }
+
+    if (newJob) {
       if (cur.length) result.push(cur.join('\n'))
       cur = [l]
       inBullets = false
@@ -138,11 +157,15 @@ function splitExpBlocksByLines(content) {
 }
 
 function splitExpBlocks(content) {
-  const blankBlocks = content.split(/\n[ \t]*\n/).map(b => b.trim()).filter(Boolean)
-  const lineBlocks = mergeFragments(splitExpBlocksByLines(content))
-  const blankMerged = mergeFragments(blankBlocks)
-
-  return lineBlocks.length >= blankMerged.length ? lineBlocks : blankMerged
+  // Blank lines in PDF extractions are unreliable — a stray blank line can land
+  // mid-job while five jobs share one block. ALWAYS sub-split every blank-line
+  // block with the line heuristic, then repair the fragments.
+  const blocks = content.split(/\n[ \t]*\n/).map(b => b.trim()).filter(Boolean)
+  const jobs = []
+  for (const b of blocks) {
+    jobs.push(...splitLinesIntoJobs(b.split('\n').map(l => l.trim()).filter(Boolean)))
+  }
+  return mergeFragments(jobs)
 }
 
 function appendItemLine(items, line) {
@@ -163,7 +186,12 @@ function parseJobHeaderLines(hdrLines) {
   let date = ''
   const lines = [...hdrLines]
 
-  if (lines.length >= 2 && !looksLikeJobTitle(lines[0]) && looksLikeJobTitle(lines[1])) {
+  // Company-before-title layout — but never treat a date line as the company
+  if (
+    lines.length >= 2 &&
+    !isDateOnlyLine(lines[0]) && !hasDate(lines[0]) &&
+    !looksLikeJobTitle(lines[0]) && looksLikeJobTitle(lines[1])
+  ) {
     company = lines[0].trim()
     lines.splice(0, 1)
   }

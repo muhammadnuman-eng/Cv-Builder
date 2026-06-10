@@ -14,80 +14,125 @@ _DATE_RE_T = re.compile(
     r'(?:\s*[\-–—to]+\s*(?:present|current|now|\d{1,2}[/\-]\d{4}|\d{4}))?',
     re.IGNORECASE,
 )
-_BULLET_CHARS_T = '•‣⁃◦▪‐‒'
+_BULLET_CHARS_T = '•‣⁃◦▪‐‒·●○'
+
+
+def _is_bullet_line(l: str) -> bool:
+    l = l.strip()
+    return bool(l) and (l[0] in _BULLET_CHARS_T or l[0] in '-*')
+
+
+def _is_date_only(l: str) -> bool:
+    """Line is just a date / date range, e.g. '08/2024 – 09/2025'."""
+    m = _DATE_RE_T.search(l)
+    return bool(m) and m.start() == 0 and not l[m.end():].strip(' \t|–—-')
+
+
+def _ends_sentence(l: str) -> bool:
+    return l.rstrip().endswith(('.', '!', '?'))
+
+
+def _split_lines_into_jobs(lines: list) -> list:
+    """
+    Split a flat run of lines into per-job blocks.
+
+    A non-bullet line AFTER bullets started is either a new job header or a
+    wrapped continuation of the previous bullet.  Decision order:
+      1. date-only line                      -> new job   ('08/2024 – 09/2025')
+      2. uppercase line containing a date    -> new job   ('Title, Co 01/2024 – 07/2025')
+      3. ends with sentence punctuation      -> continuation ('cycles and faster delivery.')
+      4. next line is date-only              -> new job   ('Title, Co' + date below)
+      5. date within 3 non-bullet lines      -> new job   (multi-line headers)
+      6. default                             -> continuation
+    """
+    result, cur, in_blt = [], [], False
+    for i, l in enumerate(lines):
+        if _is_bullet_line(l):
+            in_blt = True
+            cur.append(l)
+            continue
+        if not in_blt:
+            cur.append(l)
+            continue
+
+        new_job = False
+        if _is_date_only(l):
+            new_job = True
+        elif _DATE_RE_T.search(l) and not _ends_sentence(l) and l[:1].isupper():
+            new_job = True
+        elif _ends_sentence(l):
+            new_job = False
+        elif i + 1 < len(lines) and not _is_bullet_line(lines[i + 1]) and _is_date_only(lines[i + 1]):
+            new_job = True
+        else:
+            for k in range(1, 4):
+                li = i + k
+                if li >= len(lines) or _is_bullet_line(lines[li]):
+                    break
+                if _DATE_RE_T.search(lines[li]):
+                    new_job = True
+                    break
+
+        if new_job:
+            if cur:
+                result.append('\n'.join(cur))
+            cur = [l]
+            in_blt = False
+        else:
+            cur.append(l)
+    if cur:
+        result.append('\n'.join(cur))
+    return result
 
 
 def _merge_fragment_blocks(blocks: list) -> list:
     """
-    Merge a no-bullet block with the NEXT block ONLY when the next block's first
-    non-empty line is itself a bullet.  That pattern means the no-bullet block is a
-    split-off job header whose bullets landed in a separate blank-line block.
-
-    When the next block starts with a non-bullet line the no-bullet block is its own
-    brief job (or the job header for a job whose bullets immediately follow in the
-    same block) and must NOT be swallowed into the following job.
+    Repair blocks broken by stray blank lines:
+      - A block that STARTS with a bullet has no header — its bullets belong to
+        the previous job (a blank line split a job's bullet list in half).
+      - A block with NO bullets followed by a block that starts with a bullet
+        is a split-off header — merge the two.
     """
     result: list[str] = []
     i = 0
     while i < len(blocks):
         block = blocks[i].strip()
         lines = [l.strip() for l in block.split('\n') if l.strip()]
-        has_bullet = any(l[:1] in _BULLET_CHARS_T or l[:1] in '-*' for l in lines)
-        if not has_bullet and i + 1 < len(blocks):
+        starts_blt = bool(lines) and _is_bullet_line(lines[0])
+        has_blt = any(_is_bullet_line(l) for l in lines)
+
+        if starts_blt and result:
+            result[-1] += '\n' + block
+            i += 1
+            continue
+
+        if not has_blt and i + 1 < len(blocks):
             next_block = blocks[i + 1].strip()
             next_lines = [l.strip() for l in next_block.split('\n') if l.strip()]
-            next_first = next_lines[0] if next_lines else ''
-            if next_first and (next_first[:1] in _BULLET_CHARS_T or next_first[:1] in '-*'):
-                # Header fragment immediately followed by its bullet block — merge
+            if next_lines and _is_bullet_line(next_lines[0]):
                 result.append(block + '\n' + next_block)
                 i += 2
                 continue
+
         result.append(block)
         i += 1
     return result if result else blocks
 
 
 def _split_experience_blocks(experience_text: str) -> list:
-    """Split experience text into per-job blocks with fallback heuristic."""
+    """
+    Split experience text into per-job blocks.
+
+    Blank lines in PDF extractions are unreliable: a stray blank line can land
+    mid-job while five jobs share a single block.  So ALWAYS sub-split every
+    blank-line block with the line heuristic, then repair the fragments.
+    """
     blocks = [b.strip() for b in re.split(r'\n[ \t]*\n', experience_text.strip()) if b.strip()]
-    if len(blocks) > 1:
-        return _merge_fragment_blocks(blocks)
-
-    lines = [l.strip() for l in experience_text.split('\n') if l.strip()]
-    result, cur, in_blt = [], [], False
-
-    def _next_have_date(idx):
-        # Look ahead up to 5 non-bullet lines for a date.
-        # Stop at the next bullet — years inside bullets are not job boundaries.
-        for k in range(1, 6):
-            li = idx + k
-            if li >= len(lines):
-                break
-            if lines[li][:1] in _BULLET_CHARS_T or lines[li][:1] in '-*':
-                break
-            if _DATE_RE_T.search(lines[li]):
-                return True
-        return False
-
-    for i, l in enumerate(lines):
-        is_blt = l[:1] in _BULLET_CHARS_T or l[:1] in '-*'
-        if is_blt:
-            in_blt = True
-            cur.append(l)
-        elif not in_blt:
-            cur.append(l)
-        else:
-            is_new = '|' in l or _DATE_RE_T.search(l) or _next_have_date(i)
-            if is_new:
-                if cur:
-                    result.append('\n'.join(cur))
-                cur = [l]
-                in_blt = False
-            else:
-                cur.append(l)
-    if cur:
-        result.append('\n'.join(cur))
-    return _merge_fragment_blocks(result) if result else blocks
+    jobs: list[str] = []
+    for b in blocks:
+        lines = [l.strip() for l in b.split('\n') if l.strip()]
+        jobs.extend(_split_lines_into_jobs(lines))
+    return _merge_fragment_blocks(jobs)
 
 
 def _parse_experience_jobs(experience_text: str) -> list[dict]:
@@ -109,11 +154,9 @@ def _parse_experience_jobs(experience_text: str) -> list[dict]:
         in_bullets = False
 
         for line in lines:
-            stripped = line.strip()
-            is_bullet = stripped[:1] in ('•', '-', '*', '○', '◦', '▪', '‐')
-            if is_bullet:
+            if _is_bullet_line(line):
                 in_bullets = True
-            if in_bullets or is_bullet:
+            if in_bullets:
                 bullets.append(line)
             else:
                 header.append(line)
@@ -235,16 +278,25 @@ async def tailor_cv(cv_sections: dict, jd_analysis: dict, _original_format: str)
     job0 = jobs[0]
     job0_header = '\n'.join(job0['header_lines'])
 
-    print(f"[tailor_cv] calling Qwen for job0='{job0_header[:40]}' ({len(job0['bullet_lines'])} bullets)")
+    # Merge wrapped continuation lines into their bullet so the AI sees whole
+    # bullets, never raw line fragments (or another job's header by accident).
+    job0_bullets = []
+    for line in job0['bullet_lines']:
+        if _is_bullet_line(line) or not job0_bullets:
+            job0_bullets.append(line.strip())
+        else:
+            job0_bullets[-1] += ' ' + line.strip()
+
+    print(f"[tailor_cv] calling Qwen for job0='{job0_header[:40]}' ({len(job0_bullets)} bullets)")
     updated_0 = await _rewrite_bullets(
-        job0_header, job0['bullet_lines'],
+        job0_header, job0_bullets,
         jd_analysis,
     )
     print(f"[tailor_cv] Qwen done. updated_0={len(updated_0)}")
 
     # Build old→new mapping for targeted PDF line replacement
     replacements = []
-    for old, new in zip(job0['bullet_lines'], updated_0):
+    for old, new in zip(job0_bullets, updated_0):
         if old.strip() != new.strip():
             replacements.append({'old': old.strip(), 'new': new.strip()})
             print(f"[tailor_cv] replacement: {old.strip()[:40]!r} → {new.strip()[:40]!r}")
