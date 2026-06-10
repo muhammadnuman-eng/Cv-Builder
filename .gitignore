@@ -1,0 +1,50 @@
+# ── Environment & secrets ───────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Python / Backend ────────────────────────────────────────────────────────
+backend/venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/**/*.pyc
+backend/**/*.pyo
+*.pyc
+*.pyo
+*.pyd
+
+# Database
+backend/*.db
+backend/*.sqlite3
+
+# Generated / uploaded / stored files
+backend/generated/
+backend/uploads/
+backend/storage/
+backend/visual_diff/
+
+# Debug output files
+backend/debug_*.pdf
+backend/debug_*.py
+backend/verify_*.py
+backend/check_*.py
+backend/test_*.py
+backend/patch_*.py
+backend/visual_regression*.py
+backend/debug_zorder*
+
+# ── Node / Frontend ─────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.vercel/
+
+# ── IDE & OS ─────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Claude internal ──────────────────────────────────────────────────────────
+.claude/
