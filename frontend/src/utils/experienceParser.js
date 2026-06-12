@@ -1,4 +1,5 @@
-const DATE_RE_STR = String.raw`\b(\d{1,2}[/\-]\d{4}|\d{4})(?:\s*[-–—to]+\s*(?:present|current|now|\d{1,2}[/\-]\d{4}|\d{4}))?`
+const MONTH_STR = String.raw`(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?`
+const DATE_RE_STR = String.raw`\b(?:${MONTH_STR}\s+)?(\d{1,2}[/\-]\d{4}|\d{4})(?:\s*[-–—to]+\s*(?:present|current|now|(?:${MONTH_STR}\s+)?(?:\d{1,2}[/\-]\d{4}|\d{4})))?`
 const BULLET_RE = /^[•‣⁃◦▪‐‒\-\*·●○◦▪]\s*/
 const JOB_TITLE_KW = /\b(developer|engineer|lead|manager|architect|consultant|analyst|designer|specialist|director|intern|programmer|devops|administrator|officer|coordinator|head)\b/i
 const INLINE_JOB_RE = new RegExp(

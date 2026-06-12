@@ -1,310 +1,159 @@
 import re
 from ai.services.qwen import call_qwen
 
-DATE_PATTERN = re.compile(
-    r'\b\d{4}\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s*[\.\-]?\s*\d{4}\b',
-    re.IGNORECASE,
-)
+# Sections that are pure identity data — never sent to the AI, never rewritten.
+_PROTECTED = {'header', 'contact'}
+
+# Sections rendered first in the template — keep this order in the prompt so the
+# model sees the CV the way a reader would.
+_SECTION_ORDER = [
+    'summary', 'objective', 'skills', 'experience',
+    'education', 'projects', 'certifications', 'languages', 'awards',
+]
+
+_SECTION_MARK = re.compile(r'^===SECTION:\s*([a-z_]+)\s*===\s*$', re.IGNORECASE | re.MULTILINE)
+
+_BULLET_CHARS = '•‣⁃◦▪‐‒·●○'
 
 
-# ─── Job block parser ──────────────────────────────────────────────────────────
-
-_DATE_RE_T = re.compile(
-    r'\b(\d{1,2}[/\-]\d{4}|\d{4})'
-    r'(?:\s*[\-–—to]+\s*(?:present|current|now|\d{1,2}[/\-]\d{4}|\d{4}))?',
-    re.IGNORECASE,
-)
-_BULLET_CHARS_T = '•‣⁃◦▪‐‒·●○'
+def _has_bullets(text: str) -> bool:
+    return any(l.strip()[:1] in _BULLET_CHARS or l.strip()[:1] in '-*'
+               for l in text.split('\n') if l.strip())
 
 
-def _is_bullet_line(l: str) -> bool:
-    l = l.strip()
-    return bool(l) and (l[0] in _BULLET_CHARS_T or l[0] in '-*')
+def _ordered_keys(sections: dict) -> list:
+    known = [k for k in _SECTION_ORDER if k in sections]
+    rest = [k for k in sections if k not in known and k not in _PROTECTED]
+    return known + rest
 
 
-def _is_date_only(l: str) -> bool:
-    """Line is just a date / date range, e.g. '08/2024 – 09/2025'."""
-    m = _DATE_RE_T.search(l)
-    return bool(m) and m.start() == 0 and not l[m.end():].strip(' \t|–—-')
-
-
-def _ends_sentence(l: str) -> bool:
-    return l.rstrip().endswith(('.', '!', '?'))
-
-
-def _split_lines_into_jobs(lines: list) -> list:
-    """
-    Split a flat run of lines into per-job blocks.
-
-    A non-bullet line AFTER bullets started is either a new job header or a
-    wrapped continuation of the previous bullet.  Decision order:
-      1. date-only line                      -> new job   ('08/2024 – 09/2025')
-      2. uppercase line containing a date    -> new job   ('Title, Co 01/2024 – 07/2025')
-      3. ends with sentence punctuation      -> continuation ('cycles and faster delivery.')
-      4. next line is date-only              -> new job   ('Title, Co' + date below)
-      5. date within 3 non-bullet lines      -> new job   (multi-line headers)
-      6. default                             -> continuation
-    """
-    result, cur, in_blt = [], [], False
-    for i, l in enumerate(lines):
-        if _is_bullet_line(l):
-            in_blt = True
-            cur.append(l)
-            continue
-        if not in_blt:
-            cur.append(l)
-            continue
-
-        new_job = False
-        if _is_date_only(l):
-            new_job = True
-        elif _DATE_RE_T.search(l) and not _ends_sentence(l) and l[:1].isupper():
-            new_job = True
-        elif _ends_sentence(l):
-            new_job = False
-        elif i + 1 < len(lines) and not _is_bullet_line(lines[i + 1]) and _is_date_only(lines[i + 1]):
-            new_job = True
-        else:
-            for k in range(1, 4):
-                li = i + k
-                if li >= len(lines) or _is_bullet_line(lines[li]):
-                    break
-                if _DATE_RE_T.search(lines[li]):
-                    new_job = True
-                    break
-
-        if new_job:
-            if cur:
-                result.append('\n'.join(cur))
-            cur = [l]
-            in_blt = False
-        else:
-            cur.append(l)
-    if cur:
-        result.append('\n'.join(cur))
-    return result
-
-
-def _merge_fragment_blocks(blocks: list) -> list:
-    """
-    Repair blocks broken by stray blank lines:
-      - A block that STARTS with a bullet has no header — its bullets belong to
-        the previous job (a blank line split a job's bullet list in half).
-      - A block with NO bullets followed by a block that starts with a bullet
-        is a split-off header — merge the two.
-    """
-    result: list[str] = []
-    i = 0
-    while i < len(blocks):
-        block = blocks[i].strip()
-        lines = [l.strip() for l in block.split('\n') if l.strip()]
-        starts_blt = bool(lines) and _is_bullet_line(lines[0])
-        has_blt = any(_is_bullet_line(l) for l in lines)
-
-        if starts_blt and result:
-            result[-1] += '\n' + block
-            i += 1
-            continue
-
-        if not has_blt and i + 1 < len(blocks):
-            next_block = blocks[i + 1].strip()
-            next_lines = [l.strip() for l in next_block.split('\n') if l.strip()]
-            if next_lines and _is_bullet_line(next_lines[0]):
-                result.append(block + '\n' + next_block)
-                i += 2
-                continue
-
-        result.append(block)
-        i += 1
-    return result if result else blocks
-
-
-def _split_experience_blocks(experience_text: str) -> list:
-    """
-    Split experience text into per-job blocks.
-
-    Blank lines in PDF extractions are unreliable: a stray blank line can land
-    mid-job while five jobs share a single block.  So ALWAYS sub-split every
-    blank-line block with the line heuristic, then repair the fragments.
-    """
-    blocks = [b.strip() for b in re.split(r'\n[ \t]*\n', experience_text.strip()) if b.strip()]
-    jobs: list[str] = []
-    for b in blocks:
-        lines = [l.strip() for l in b.split('\n') if l.strip()]
-        jobs.extend(_split_lines_into_jobs(lines))
-    return _merge_fragment_blocks(jobs)
-
-
-def _parse_experience_jobs(experience_text: str) -> list[dict]:
-    """
-    Split experience section into individual job blocks.
-    Returns list of dicts: {header_lines, bullet_lines, original_block}
-    First entry = most recent job (as they appear in CV).
-    """
-    raw_blocks = _split_experience_blocks(experience_text)
-    jobs = []
-
-    for block in raw_blocks:
-        lines = [l for l in block.strip().split('\n') if l.strip()]
-        if not lines:
-            continue
-
-        header = []
-        bullets = []
-        in_bullets = False
-
-        for line in lines:
-            if _is_bullet_line(line):
-                in_bullets = True
-            if in_bullets:
-                bullets.append(line)
-            else:
-                header.append(line)
-
-        jobs.append({
-            'header_lines': header,
-            'bullet_lines': bullets,
-            'original_block': block,
-        })
-
-    return jobs
-
-
-def _rebuild_experience(jobs: list[dict], updated_bullets_0: list[str]) -> str:
-    """
-    Reconstruct full experience text.
-    Only bullets for job[0] (current/most recent job) are replaced; all others verbatim.
-    """
-    rebuilt = []
-    for i, job in enumerate(jobs):
-        block_lines = job['header_lines'][:]
-        if i == 0 and updated_bullets_0:
-            block_lines.extend(updated_bullets_0)
-        else:
-            block_lines.extend(job['bullet_lines'])
-        rebuilt.append('\n'.join(block_lines))
-    return '\n\n'.join(rebuilt)
-
-
-# ─── AI bullet rewriter ────────────────────────────────────────────────────────
-
-async def _rewrite_bullets(
-    job0_header: str, job0_bullets: list[str],
-    jd_analysis: dict,
-) -> list[str]:
-    """Rewrite bullets for the current (most recent) job only."""
-    stacks      = ', '.join(jd_analysis.get('detected_stacks', [])[:12])
+def _build_prompt(sections: dict, jd_analysis: dict) -> str:
+    stacks = ', '.join(jd_analysis.get('detected_stacks', [])[:15])
     ai_analysis = jd_analysis.get('ai_analysis', '')
-    n0 = len(job0_bullets) or 3
-    job0_text = '\n'.join(job0_bullets) if job0_bullets else '(no bullets)'
 
-    prompt = f"""You are an expert CV writer. Rewrite ONLY the bullet points below to match the job requirements.
+    blocks = []
+    for key in _ordered_keys(sections):
+        if key in _PROTECTED:
+            continue
+        content = (sections.get(key) or '').strip()
+        if not content:
+            continue
+        blocks.append(f"===SECTION: {key}===\n{content}")
+    cv_text = '\n\n'.join(blocks)
 
-CRITICAL FORMATTING INSTRUCTIONS (MANDATORY — higher priority than everything else):
-- Preserve the original resume formatting exactly as provided.
-- Do NOT change the layout, structure, section order, spacing, indentation, or alignment.
-- Keep all bullet points as bullet points — NEVER convert to paragraphs or plain text.
-- Do NOT merge, split, or reorder existing bullet points.
-- Maintain the same formatting for each bullet: same starting symbol (•), same approximate length.
-- Only update the content of the bullet while preserving its original formatting.
-- Return bullets using the exact same structure as the input bullets.
-- Each rewritten bullet must start with • and be a SINGLE line (no line breaks inside a bullet).
-- Keep each bullet roughly the same length as the original (±20%).
+    return f"""You are an expert CV writer. Below is a complete CV split into sections, \
+and the requirements of a job the candidate is applying for. Rewrite the ENTIRE CV text — \
+every section, top to bottom — so it is strongly tailored to this job. Do not leave any \
+sentence as-is unless it is a pure fact (a name, a date, a title).
 
-CONTENT RULES:
-1. Do NOT change job titles, company names, or dates — only bullet content
-2. Keep EXACTLY {n0} bullets
-3. Start each bullet with a strong action verb
-4. Naturally include relevant tech stacks where they fit
-5. Be concise and achievement-oriented (numbers/impact preferred)
-6. Output ONLY the section below — no extra text, no explanations
+WHAT TO REWRITE (everything):
+- summary/objective: fully rewrite to position the candidate for THIS job.
+- skills: keep every "Category:" label line, but reorder and update the skill lists so the \
+job's required stacks appear prominently. You may add required stacks that plausibly fit the \
+candidate's background and drop irrelevant ones.
+- experience: rewrite ALL bullet points of ALL jobs (not just the first) to emphasize \
+achievements relevant to the job requirements, weaving in the required tech stacks where \
+they plausibly fit. Strong action verbs, numbers/impact where possible.
+- projects: rewrite each project description to highlight relevance to the job. Keep every \
+"Tech Stack:" line in place (you may adjust its list to be accurate to the description).
+- education / certifications / awards / languages: keep degree names, institutions, dates and \
+certificate names EXACTLY as given; you may only rewrite descriptive bullet lines under them.
+
+HARD FACTUAL RULES (never violate):
+1. NEVER change or invent: job titles, company names, employment dates, institution names, \
+degree names, certification names, project names.
+2. NEVER invent employers, degrees, or certifications that are not in the CV.
+
+HARD FORMATTING RULES (the output is parsed by a program — violating these breaks it):
+1. Return EVERY section below, each starting with its exact marker line: ===SECTION: key===
+2. Inside each section keep the SAME line structure as the input: a header line stays one \
+header line, a bullet stays a bullet.
+3. Every bullet line must start with "• " and be ONE single line (no line breaks inside a bullet).
+4. Keep the SAME number of bullets per job/entry as the input.
+5. Keep each line roughly the same length as the original (±25%).
+6. Do NOT add, remove, merge, split or reorder lines, jobs, projects or sections.
+7. Output ONLY the sections with their markers — no explanations, no extra text, no markdown fences.
 
 REQUIRED TECH STACKS: {stacks}
+
 JOB REQUIREMENTS:
-{ai_analysis[:600]}
+{ai_analysis[:800]}
 
---- CURRENT JOB ---
-{job0_header}
-Original bullets ({n0}):
-{job0_text}
+--- CV SECTIONS (rewrite all of this) ---
 
-Return in EXACTLY this format (nothing else):
-
-CURRENT_JOB_BULLETS: exactly {n0} bullets
-• ...
+{cv_text}
 """
 
-    response = await call_qwen(prompt, max_tokens=900, model='qwen-plus')
-    b0 = _extract_section_bullets(response, 'CURRENT_JOB_BULLETS', n0)
-    return b0 or job0_bullets
+
+def _parse_response(response: str, original_sections: dict) -> dict:
+    """Split the AI response back into sections by marker lines."""
+    text = response.strip()
+    # Strip accidental markdown fences
+    text = re.sub(r'^```[a-z]*\s*|\s*```$', '', text, flags=re.IGNORECASE)
+
+    parsed = {}
+    matches = list(_SECTION_MARK.finditer(text))
+    for i, m in enumerate(matches):
+        key = m.group(1).lower()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        content = text[start:end].strip()
+        if key in original_sections and content:
+            parsed[key] = content
+    return parsed
 
 
-def _extract_section_bullets(text: str, label: str, expected: int) -> list[str]:
-    pattern = rf'{re.escape(label)}[^\n]*\n((?:[ \t]*[•\-\*○◦▪][^\n]*\n?)+)'
-    m = re.search(pattern, text, re.IGNORECASE)
-    if not m:
-        return []
-    raw = m.group(1)
-    bullets = [l.strip() for l in raw.split('\n') if l.strip() and l.strip()[0] in '•-*○◦▪']
-    bullets = ['• ' + b.lstrip('•-*○◦▪ ') for b in bullets]
-    return bullets[:expected] if bullets else []
+def _accept(key: str, new: str, old: str) -> bool:
+    """Guard against truncated / degenerate rewrites — fall back to original."""
+    if not new.strip():
+        return False
+    # A rewrite that lost most of the text is almost certainly truncated output
+    if len(new) < len(old) * 0.4:
+        return False
+    # If the original had bullets the rewrite must still have bullets
+    if _has_bullets(old) and not _has_bullets(new):
+        return False
+    return True
 
 
 # ─── Public API ────────────────────────────────────────────────────────────────
 
 async def tailor_cv(cv_sections: dict, jd_analysis: dict, _original_format: str) -> tuple[dict, list]:
     """
-    Update ONLY the bullet points of the current (most recent) job in the experience section.
-    Every other section (header, contact, summary, skills, education, …) is returned unchanged.
+    Send the FULL CV text to the AI and replace every section with the AI's
+    rewritten version. Only identity sections (header, contact) pass through
+    unchanged. Sections the AI drops or mangles fall back to the original.
 
-    Returns (updated_sections, experience_replacements).
-    experience_replacements is a list of {old, new} dicts for targeted PDF replacement.
+    Returns (updated_sections, experience_replacements) — replacements list is
+    kept for API compatibility but is no longer used downstream.
     """
     print(f"\n[tailor_cv] sections: {list(cv_sections.keys())}")
-    experience = cv_sections.get('experience', '').strip()
-    print(f"[tailor_cv] experience: {len(experience)} chars")
-    if not experience:
-        print("[tailor_cv] *** experience EMPTY — no change ***")
+
+    rewritable = [k for k in _ordered_keys(cv_sections)
+                  if (cv_sections.get(k) or '').strip()]
+    if not rewritable:
+        print("[tailor_cv] *** nothing to rewrite — no change ***")
         return cv_sections, []
 
-    jobs = _parse_experience_jobs(experience)
-    print(f"[tailor_cv] jobs found: {len(jobs)}")
-    for i, j in enumerate(jobs[:3]):
-        print(f"  job[{i}] header={j['header_lines'][:1]} bullets={len(j['bullet_lines'])}")
-    if not jobs:
-        print("[tailor_cv] *** no jobs parsed — no change ***")
-        return cv_sections, []
+    prompt = _build_prompt(cv_sections, jd_analysis)
+    cv_chars = sum(len(cv_sections.get(k) or '') for k in rewritable)
+    # Output is roughly the same size as the input CV — budget generously
+    max_tokens = min(8000, max(2500, int(cv_chars / 2.5)))
+    print(f"[tailor_cv] calling Qwen: full CV rewrite "
+          f"({len(rewritable)} sections, {cv_chars} chars, max_tokens={max_tokens})")
 
-    job0 = jobs[0]
-    job0_header = '\n'.join(job0['header_lines'])
-
-    # Merge wrapped continuation lines into their bullet so the AI sees whole
-    # bullets, never raw line fragments (or another job's header by accident).
-    job0_bullets = []
-    for line in job0['bullet_lines']:
-        if _is_bullet_line(line) or not job0_bullets:
-            job0_bullets.append(line.strip())
-        else:
-            job0_bullets[-1] += ' ' + line.strip()
-
-    print(f"[tailor_cv] calling Qwen for job0='{job0_header[:40]}' ({len(job0_bullets)} bullets)")
-    updated_0 = await _rewrite_bullets(
-        job0_header, job0_bullets,
-        jd_analysis,
-    )
-    print(f"[tailor_cv] Qwen done. updated_0={len(updated_0)}")
-
-    # Build old→new mapping for targeted PDF line replacement
-    replacements = []
-    for old, new in zip(job0_bullets, updated_0):
-        if old.strip() != new.strip():
-            replacements.append({'old': old.strip(), 'new': new.strip()})
-            print(f"[tailor_cv] replacement: {old.strip()[:40]!r} → {new.strip()[:40]!r}")
-
-    print(f"[tailor_cv] total replacements: {len(replacements)}")
-
-    updated_experience = _rebuild_experience(jobs, updated_0)
+    response = await call_qwen(prompt, max_tokens=max_tokens, model='qwen-plus')
+    parsed = _parse_response(response, cv_sections)
+    print(f"[tailor_cv] Qwen done. sections returned: {list(parsed.keys())}")
 
     result = dict(cv_sections)
-    result['experience'] = updated_experience
-    return result, replacements
+    for key in rewritable:
+        new = parsed.get(key, '')
+        old = (cv_sections.get(key) or '').strip()
+        if _accept(key, new, old):
+            result[key] = new
+            print(f"[tailor_cv] '{key}' rewritten ({len(old)} -> {len(new)} chars)")
+        else:
+            print(f"[tailor_cv] '{key}' rejected/missing — keeping original")
+
+    return result, []

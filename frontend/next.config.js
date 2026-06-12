@@ -2,6 +2,12 @@
 const nextConfig = {
   reactStrictMode: true,
 
+  // Full-CV AI tailoring takes minutes — the default 30s proxy timeout
+  // kills the request with a 500 while the backend is still working
+  experimental: {
+    proxyTimeout: 600000, // 10 minutes
+  },
+
   async rewrites() {
     return [
       {

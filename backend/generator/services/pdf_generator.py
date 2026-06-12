@@ -77,10 +77,11 @@ _SFS = 14.0      # section heading font size
 _BULLET_CHARS = '•‣⁃◦▪‐‒·●○'
 _STRIP_RE     = re.compile(r'^[•‣⁃◦▪‐‒\-\*\s]+')
 
+_MONTH = r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?'
 _DATE_RE = re.compile(
-    r'\b(\d{1,2}[/\-]\d{4}|\d{4})'
-    r'(?:\s*[-–—to]+\s*'
-    r'(?:present|current|now|\d{1,2}[/\-]\d{4}|\d{4}))?',
+    rf'\b(?:{_MONTH}\s+)?(\d{{1,2}}[/\-]\d{{4}}|\d{{4}})'
+    rf'(?:\s*[-–—to]+\s*'
+    rf'(?:present|current|now|(?:{_MONTH}\s+)?(?:\d{{1,2}}[/\-]\d{{4}}|\d{{4}})))?',
     re.IGNORECASE,
 )
 
